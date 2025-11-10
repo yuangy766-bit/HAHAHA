@@ -16,33 +16,42 @@ st.title("高考数学能力画像（AI 研究演示）")
 st.caption("上传数据 → 字段映射 → 计算六维能力 → 图表展示 → AI 生成分析 → 与 AI 对话（含情绪安慰）")
 
 # -------------- 工具函数：是否启用 LLM --------------
+
+from openai import OpenAI
+  client = OpenAI(
+      base_url="https://api.gptsapi.net/v1",
+      api_key="sk-fzHb878616cca06d7f1537fa39e15a1379fba3c8751VsjyP"
+  )
+
 def llm_enabled():
     return bool(os.getenv("OPENAI_API_KEY", "").strip())
 
 def call_llm(system_prompt: str, user_prompt: str) -> str:
     """
-    如配置 OPENAI_API_KEY 就调用 LLM，否则返回启发式文本。
+    AI 调用逻辑：如果没有密钥 → 使用启发式回复；
+    如果配置了密钥 → 使用模型生成自然语言分析或情绪对话。
     """
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+    # 没有 key → 启发式情绪安慰 + 学习建议
     if not api_key:
         return heuristic_reply(user_prompt)
 
     try:
-        import openai
-        openai.api_key = api_key
-        # 你也可换成其他兼容的模型，如 gpt-4o-mini / gpt-3.5-turbo 等
-        resp = openai.ChatCompletion.create(
+        client = get_client()
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_prompt}
             ],
-            temperature=0.2,
-            max_tokens=800,
+            temperature=0.25,
+            max_tokens=800
         )
-        return resp.choices[0].message["content"].strip()
+        return response.choices[0].message.content
+
     except Exception as e:
-        return f"(LLM 调用失败：{e})\n下面给出启发式建议：\n" + heuristic_reply(user_prompt)
+        return f"【AI 调用失败】{e}\n改为使用简单建议：\n" + heuristic_reply(user_prompt)
 
 def heuristic_reply(text: str) -> str:
     """
