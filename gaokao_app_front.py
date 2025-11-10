@@ -17,41 +17,42 @@ st.caption("上传数据 → 字段映射 → 计算六维能力 → 图表展�
 
 # -------------- 工具函数：是否启用 LLM --------------
 
-from openai import OpenAI
-  client = OpenAI(
-      base_url="https://api.gptsapi.net/v1",
-      api_key="sk-fzHb878616cca06d7f1537fa39e15a1379fba3c8751VsjyP"
-  )
-
 def llm_enabled():
     return bool(os.getenv("OPENAI_API_KEY", "").strip())
 
+from openai import OpenAI
+import os
+
 def call_llm(system_prompt: str, user_prompt: str) -> str:
     """
-    AI 调用逻辑：如果没有密钥 → 使用启发式回复；
-    如果配置了密钥 → 使用模型生成自然语言分析或情绪对话。
+    优先使用 Secrets 中的配置。
+    没配置 key 就自动回退到启发式建议（不会报错）。
     """
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-
-    # 没有 key → 启发式情绪安慰 + 学习建议
+    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         return heuristic_reply(user_prompt)
 
+    base_url = st.secrets.get("OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+    model_id = st.secrets.get("OPENAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+
     try:
-        client = get_client()
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url
+        )
+        resp = client.chat.completions.create(
+            model=model_id,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": user_prompt},
             ],
-            temperature=0.25,
-            max_tokens=800
+            temperature=0.2,
+            max_tokens=800,
         )
-        return response.choices[0].message.content
+        return resp.choices[0].message.content.strip()
 
     except Exception as e:
-        return f"【AI 调用失败】{e}\n改为使用简单建议：\n" + heuristic_reply(user_prompt)
+        return f"(AI 调用失败：{e})\n下面给出启发式建议：\n" + heuristic_reply(user_prompt)
 
 def heuristic_reply(text: str) -> str:
     """
