@@ -1,136 +1,110 @@
-# app_improved.py
-import os, json, math, io
+# app.py
+import os, json, math, io, csv
 from datetime import datetime
-
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
-# ---------------- 页面配置 ----------------
+# -------------- 页面配置 --------------
 st.set_page_config(page_title="高考数学能力画像（AI版）", layout="wide")
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial']
+plt.rcParams['font.sans-serif'] = ['SimHei','Microsoft YaHei','Arial']
 plt.rcParams['axes.unicode_minus'] = False
 
-st.markdown(
-    """
-    <style>
-    .stApp header {visibility: hidden}
-    .big-title {font-size:28px; font-weight:700}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 st.title("高考数学能力画像（AI 研究演示）")
-st.caption("上传数据 → 字段映射 → 计算六维能力 → 图表展示 → AI 生成分析 → 与 AI 对话（含情绪安慰)")
+st.caption("上传数据 → 字段映射 → 选择卷别（内置“近年题型/能力”先验，可调）→ 计算六维能力 → 图表展示 → AI 生成分析 → 与 AI 对话（含情绪安慰）")
 
-# ----------------- 工具函数：是否启用 LLM -----------------
-
+# -------------- AI 调用封装（兼容“未配置密钥”）--------------
 def llm_enabled():
-    return bool(os.getenv("OPENAI_API_KEY", "").strip() or bool(st.secrets.get("OPENAI_API_KEY")))
+    return bool(os.getenv("OPENAI_API_KEY","").strip())
 
-# 统一 LLM 调用封装（优先使用 secrets）
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
-
+from openai import OpenAI
+import os
 
 def call_llm(system_prompt: str, user_prompt: str) -> str:
-    """优先使用 Streamlit secrets 或环境变量中的 API Key。
-    若没有配置则回退到启发式回复（不会抛异常）。
     """
-    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key or OpenAI is None:
+    使用 gptsapi.net 网关的安全 LLM 调用。
+    如果没有配置 Secrets，则自动返回启发式安慰/学习建议，不会导致应用崩溃。
+    """
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
         return heuristic_reply(user_prompt)
 
-    base_url = st.secrets.get("OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
-    model_id = st.secrets.get("OPENAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.gptsapi.net/v1")
+    model_id = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url)
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url
+        )
         resp = client.chat.completions.create(
             model=model_id,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.15,
-            max_tokens=900,
+            temperature=0.25,
+            max_tokens=800
         )
         return resp.choices[0].message.content.strip()
-    except Exception as e:
-        # 对外返回友好信息并退回启发式
-        return f"(AI 调用失败：{e})\n下面给出启发式建议：\n" + heuristic_reply(user_prompt)
 
+    except Exception as e:
+        return f"(AI 调用失败：{e})\n改为启发式建议：\n" + heuristic_reply(user_prompt)
 
 def heuristic_reply(text: str) -> str:
-    t = text.lower()
+    """未配置 API 时的兜底建议（含情绪安慰）。"""
+    t = (text or "").lower()
     tips = []
-    if any(k in t for k in ["anxious", "anxiety", "焦虑", "紧张", "担心", "压力"]):
-        tips.append("我能理解你的紧张和压力。先深呼吸，给自己 2–3 分钟放松。学习上，我们从最薄弱的一维开始，逐步建立小胜利。")
-    if any(k in t for k in ["sad", "沮丧", "难过", "低落"]):
-        tips.append("感到沮丧是正常的。你已经迈出改善的第一步。我们把目标拆小：今天先完成 10 道针对薄弱点的小题即可。")
+    if any(k in t for k in ["焦虑","紧张","压力","anxiety","anxious"]):
+        tips.append("我理解你的紧张。先深呼吸 3 次，给自己 2 分钟缓冲。学习上从最低分维度开小步快跑，先拿到小胜利。")
+    if any(k in t for k in ["沮丧","难过","低落","sad"]):
+        tips.append("情绪低落很正常。今天先完成 10 道针对薄弱点的小题，做完就休息，第二天复盘错题。")
     if not tips:
-        tips.append("建议先从最低分的能力维度着手，一天 10–15 题，次日回顾错题并做 1–2 个新情境。保持节奏即可看到提升。")
+        tips.append("建议从最低分维度入手：每天 10–15 题，次日复盘错题，并加做 1–2 道新情境（新题型）以巩固迁移。")
     return "\n".join(tips)
 
-# ---------------- 上传数据 ----------------
+# -------------- 上传数据 --------------
 st.header("① 上传 CSV/XLSX")
-
 template = pd.DataFrame({
-    "student_id": ["S001","S001","S002"],
-    "question_id": ["Q0001","Q0002","Q0001"],
-    "subject": ["MATH","MATH","MATH"],
-    "topic": ["Functions","Probability","Geometry"],
-    "correct": [1,0,1],
-    "time_spent_sec": [60,95,80],
-    "attempts": [1,2,1],
-    "question_level": [1,3,2],
-    "is_new_type": [0,1,0],
-    "essay_len": [0,0,0],
+    "student_id":["S001","S001","S002"],
+    "question_id":["Q0001","Q0002","Q0001"],
+    "subject":["MATH","MATH","MATH"],
+    "topic":["Functions","Probability","Geometry"],
+    "qtype":["单选","填空","解答"],  # 可选：题型列
+    "correct":[1,0,1],
+    "time_spent_sec":[60,95,80],
+    "attempts":[1,2,1],
+    "question_level":[1,3,2],
+    "is_new_type":[0,1,0],
 })
-st.download_button(
-    "下载数据模板（CSV）",
-    data=template.to_csv(index=False).encode("utf-8"),
-    file_name="student_data_template.csv",
-    mime="text/csv",
-)
+st.download_button("下载数据模板（CSV）", data=template.to_csv(index=False).encode("utf-8"),
+                   file_name="student_data_template.csv", mime="text/csv")
 
-up = st.file_uploader("把 CSV 或 XLSX 拖到这里，或者点击选择文件", type=["csv","xlsx"])
+up = st.file_uploader("把 CSV 或 XLSX 拖到这里，或点击选择文件", type=["csv","xlsx"])
 if up is None:
     st.info("尚未上传文件。可先下载模板，或上传你自己的数据表。")
     st.stop()
 
-# 读取数据（增强容错）
 try:
     if up.name.lower().endswith(".csv"):
-        raw = pd.read_csv(up, encoding='utf-8')
+        raw = pd.read_csv(up)
     else:
         raw = pd.read_excel(up)
     st.success(f"已读取文件：{up.name}（{len(raw)} 行 × {len(raw.columns)} 列）")
 except Exception as e:
-    try:
-        # 备用编码
-        raw = pd.read_csv(up, encoding='gbk')
-        st.success(f"已读取文件（GBK 解析）：{up.name}（{len(raw)} 行 × {len(raw.columns)} 列）")
-    except Exception as e2:
-        st.error(f"读取失败：{e}; {e2}")
-        st.stop()
+    st.error(f"读取失败：{e}")
+    st.stop()
 
 st.subheader("数据预览（前 20 行）")
 st.dataframe(raw.head(20), use_container_width=True)
 
-# ---------------- 字段映射（自动建议 + 手动可改） ----------------
+# -------------- 字段映射（适配不同表头） --------------
 st.header("② 字段映射（自动建议 + 手动可改）")
-
-TARGET_FIELDS = [
-    "student_id","question_id","subject","topic",
-    "correct","time_spent_sec","attempts","question_level","is_new_type","essay_len"
+target_fields = [
+    "student_id","question_id","subject","topic","qtype",
+    "correct","time_spent_sec","attempts","question_level","is_new_type"
 ]
-
-# 启发式映射
 
 def heuristic_map(columns):
     cols_lower = {c.lower(): c for c in columns}
@@ -141,94 +115,51 @@ def heuristic_map(columns):
                     return ori
         return None
     m = {}
-    m["student_id"]      = find("student", "sid", "stu")
-    m["question_id"]     = find("question", "qid", "q_id", "item", "problem")
-    m["subject"]         = find("subject", "course")
-    m["topic"]           = find("topic", "knowledge", "tag", "chapter", "unit", "skill")
-    m["correct"]         = find("correct", "is_correct", "label", "y", "score")
-    m["time_spent_sec"]  = find("time", "duration", "seconds", "sec", "cost")
-    m["attempts"]        = find("attempt", "tries", "trial")
-    m["question_level"]  = find("level", "difficulty", "diff", "hard")
-    m["is_new_type"]     = find("new", "novel", "innov", "type_new")
-    m["essay_len"]       = find("essay", "words", "len", "length", "text_len")
+    m["student_id"]     = find("student","sid","stu","学号")
+    m["question_id"]    = find("question","qid","题号","小题")
+    m["subject"]        = find("subject","course","科目")
+    m["topic"]          = find("topic","knowledge","tag","chapter","unit","skill","知识点")
+    m["qtype"]          = find("qtype","type","题型","题目类型")
+    m["correct"]        = find("correct","is_correct","label","y","得分","是否正确")
+    m["time_spent_sec"] = find("time","duration","seconds","sec","用时","耗时")
+    m["attempts"]       = find("attempt","tries","trial","重做")
+    m["question_level"] = find("level","difficulty","diff","hard","难度")
+    m["is_new_type"]    = find("new","novel","innov","type_new","新题型")
     return {k:v for k,v in m.items() if v in columns}
 
 heuristic = heuristic_map(list(raw.columns))
-
-# AI 列映射建议：通过统一的 call_llm 调用（避免直接依赖 openai.ChatCompletion）
-ai_mapping = {}
-if llm_enabled():
-    try:
-        sys_prompt = "你负责把用户上传的表头映射到目标字段名（高考数学能力评估用）。只返回 JSON。"
-        user_payload = {
-            "columns": list(raw.columns),
-            "target_fields": TARGET_FIELDS,
-            "instructions": "仅返回 JSON 对象：键为目标字段，值为上传表中对应列名或 null。不要多余说明。"
-        }
-        ai_raw = call_llm(sys_prompt, "映射任务：\n" + json.dumps(user_payload, ensure_ascii=False))
-        # 尝试解析 JSON（容错）
-        candidate = ai_raw.strip()
-        if candidate.startswith('{'):
-            try:
-                ai_mapping = json.loads(candidate)
-            except Exception:
-                # 尝试从文本中抽取 JSON
-                start = candidate.find('{')
-                end = candidate.rfind('}')
-                if start!=-1 and end!=-1:
-                    try:
-                        ai_mapping = json.loads(candidate[start:end+1])
-                    except Exception:
-                        ai_mapping = {}
-        else:
-            ai_mapping = {}
-    except Exception:
-        ai_mapping = {}
-
-col1, col2 = st.columns(2)
-with col1:
-    st.write("AI 建议（若未配置 API Key 此处为空）：")
-    st.json(ai_mapping if ai_mapping else {"note":"无 AI 建议"})
-with col2:
-    st.write("启发式建议：")
-    st.json(heuristic)
+st.write("启发式建议：")
+st.json(heuristic)
 
 st.markdown("**最终映射（可下拉修改）**")
 final_map = {}
 cols = list(raw.columns)
-for t in TARGET_FIELDS:
-    default = None
-    if ai_mapping and isinstance(ai_mapping, dict):
-        default = ai_mapping.get(t) or heuristic.get(t) or None
-    else:
-        default = heuristic.get(t)
-    options = [""] + cols
-    default_index = 0
-    if default in cols:
-        default_index = options.index(default)
-    final_map[t] = st.selectbox(f"{t} ←", options=options, index=default_index, key=f"map_{t}")
+for t in target_fields:
+    default = heuristic.get(t) or None
+    final_map[t] = st.selectbox(f"{t} ←", options=[None]+cols,
+                                index=([None]+cols).index(default) if default in cols else 0,
+                                key=f"map_{t}")
 
-# 构建归一化数据框
+# 归一化
 norm = pd.DataFrame()
-for t in TARGET_FIELDS:
-    sel = final_map.get(t)
-    if sel:
-        norm[t] = raw[sel]
+for t in target_fields:
+    if final_map[t] is not None:
+        norm[t] = raw[final_map[t]]
 
 # 最小必需列
-min_required = ["student_id", "question_id", "correct"]
+min_required = ["student_id","question_id","correct"]
 missing_min = [c for c in min_required if c not in norm.columns]
 if missing_min:
     st.error(f"最少需要包含列：{missing_min}。请完成映射。")
     st.stop()
 
-# 类型与范围处理
+# 类型与范围
 if "subject" in norm.columns:
     norm["subject"] = norm["subject"].astype(str).str.upper()
 else:
     norm["subject"] = "MATH"
 
-for c in ["correct","time_spent_sec","attempts","question_level","is_new_type","essay_len"]:
+for c in ["correct","time_spent_sec","attempts","question_level","is_new_type"]:
     if c in norm.columns:
         norm[c] = pd.to_numeric(norm[c], errors="coerce")
 
@@ -240,157 +171,169 @@ if math_df.empty:
     st.error("过滤后没有 MATH 记录。")
     st.stop()
 
-# ---------------- 六维能力计算与前端控件 ----------------
-st.header("③ 评分权重与学生选择")
+# -------------- 卷别先验（近年趋势，默认可调） --------------
+st.header("③ 选择卷别 & 先验（可手动微调）")
 
-st.write("说明：拖动滑块设定每个维度的重要性，系统会根据权重计算总分；下面显示的是实测权重与归一化权重。")
-col_w1, col_w2 = st.columns([2,1])
-with col_w1:
-    W_raw = {
-        "知识理解力": st.slider("知识理解力 权重(%)", 0, 100, 25, 1, key='w1'),
-        "逻辑思维力": st.slider("逻辑思维力 权重(%)", 0, 100, 20, 1, key='w2'),
-        "创造策略力": st.slider("创造策略力 权重(%)", 0, 100, 15, 1, key='w3'),
-        "表达沟通力": st.slider("表达沟通力 权重(%)", 0, 100, 15, 1, key='w4'),
-        "时间自控力": st.slider("时间自控力 权重(%)", 0, 100, 15, 1, key='w5'),
-        "情绪稳定性": st.slider("情绪稳定性 权重(%)", 0, 100, 10, 1, key='w6'),
-    }
-with col_w2:
-    W_sum = sum(W_raw.values())
-    st.caption(f"当前权重总和：{W_sum}（计算总分时会自动归一化）")
-    auto_norm = st.checkbox("显示归一化权重", value=True)
-    if auto_norm:
-        if W_sum>0:
-            W = {k: v / W_sum for k,v in W_raw.items()}
-        else:
-            W = {k: 1/len(W_raw) for k in W_raw}
-        st.write(pd.Series(W).apply(lambda x: round(x,3)).to_frame("归一化权重"))
-    else:
-        # keep raw percentages but normalize later in calculation
-        W = W_raw
+paper = st.selectbox("卷别", ["全国一卷（I）","全国二卷（乙）","新高考一卷（新课标I）"], index=0)
+st.caption("说明：默认题型结构参考近年公开评析。支持侧栏微调以贴合你的样本。")
+
+# 题型结构先验（比例）；乙卷常见“8单选+3多选+3填空+5解答”的结构在近年连续出现
+# 参考：2025全国二卷“8+3+3+5”延续2024结构（来源：鸡西教育局网站评析）；近年全国卷强调基础性与核心素养考查（中国教育在线/新华社/南方网等评析）
+qtype_prior = {
+    "全国一卷（I）":      {"单选":0.40, "多选":0.10, "填空":0.17, "解答":0.33},
+    "全国二卷（乙）":      {"单选":0.42, "多选":0.16, "填空":0.16, "解答":0.26},  # “8+3+3+5”导出的比率近似
+    "新高考一卷（新课标I）": {"单选":0.40, "多选":0.10, "填空":0.17, "解答":0.33},
+}
+
+# 能力维度先验（结合“抽象/推理/建模/直观/运算/数据分析/创新”等核心素养导向）
+ability_names = ["知识理解力","逻辑思维力","创造策略力","表达规范性","时间自控力","情绪稳定性"]
+# 各题型对能力的典型权重（可调）
+ability_by_qtype = {
+    "单选": {"知识理解力":0.35,"逻辑思维力":0.25,"创造策略力":0.10,"表达规范性":0.10,"时间自控力":0.15,"情绪稳定性":0.05},
+    "多选": {"知识理解力":0.25,"逻辑思维力":0.30,"创造策略力":0.20,"表达规范性":0.10,"时间自控力":0.10,"情绪稳定性":0.05},
+    "填空": {"知识理解力":0.30,"逻辑思维力":0.25,"创造策略力":0.15,"表达规范性":0.05,"时间自控力":0.20,"情绪稳定性":0.05},
+    "解答": {"知识理解力":0.20,"逻辑思维力":0.30,"创造策略力":0.20,"表达规范性":0.20,"时间自控力":0.05,"情绪稳定性":0.05},
+}
+
+# 侧栏允许覆盖先验
+st.sidebar.header("题型分布权重（按卷别微调）")
+qtw = qtype_prior[paper].copy()
+for k in list(qtw.keys()):
+    qtw[k] = st.sidebar.slider(f"{k} 占比(%)", 0, 100, int(round(qtw[k]*100)), 1)/100.0
+# 归一化
+s = sum(qtw.values())
+if s>0: qtw = {k:v/s for k,v in qtw.items()}
+
+st.sidebar.header("题型→能力 映射（可微调）")
+ab_map = {}
+for qt in ["单选","多选","填空","解答"]:
+    ab_map[qt] = {}
+    for ab in ability_names:
+        default = ability_by_qtype[qt][ab]
+        ab_map[qt][ab] = st.sidebar.slider(f"{qt}→{ab}(%)", 0, 100, int(default*100), 5)/100.0
+
+# -------------- 评分权重 + 学生选择 --------------
+st.header("④ 评分权重与学生选择")
+W = {
+    "知识理解力": st.slider("知识理解力 权重(%)", 0,100,25,1),
+    "逻辑思维力": st.slider("逻辑思维力 权重(%)", 0,100,20,1),
+    "创造策略力": st.slider("创造策略力 权重(%)", 0,100,15,1),
+    "表达规范性": st.slider("表达规范性 权重(%)", 0,100,15,1),
+    "时间自控力": st.slider("时间自控力 权重(%)", 0,100,15,1),
+    "情绪稳定性": st.slider("情绪稳定性 权重(%)", 0,100,10,1),
+}
+W_sum = sum(W.values())
+st.caption(f"当前权重总和：{W_sum}（计算总分时会自动归一化）")
 
 students = sorted(math_df["student_id"].dropna().astype(str).unique())
 sid = st.selectbox("选择学生", students, index=0)
 sdf = math_df[math_df["student_id"].astype(str)==sid].copy()
 
-# ---------------- 评分函数 ----------------
+# -------------- 能力打分函数（融合题型、难度、用时、尝试次数等） --------------
+def score_by_ability(group: pd.DataFrame) -> dict:
+    g = group.copy()
+    # 题型列
+    if "qtype" not in g.columns:
+        g["qtype"] = "解答"  # 若无题型列，默认按“解答”处理
+    # 基础清洗
+    for c in ["correct","time_spent_sec","attempts","question_level","is_new_type"]:
+        if c in g.columns: g[c] = pd.to_numeric(g[c], errors="coerce")
+    # 基础组件
+    # 正确率（按题型）
+    type_acc = {}
+    for qt in ["单选","多选","填空","解答"]:
+        sub = g[g["qtype"].astype(str)==qt]
+        type_acc[qt] = sub["correct"].mean() if len(sub)>0 else np.nan
+    # 用时效率（按难度基线）
+    def time_eff(x: pd.Series, lv: pd.Series):
+        baseline = {1:60, 2:90, 3:120, 4:135, 5:150}
+        ideal = sum(baseline.get(int(a),90) for a in lv.dropna().astype(int)) or 0
+        actual = x.replace(0, np.nan).sum()
+        if ideal<=0: return np.nan
+        if actual<=0: return 1.0
+        return max(0.0, min(1.2, ideal/actual))  # 封顶稍>1
+    te = time_eff(g.get("time_spent_sec", pd.Series([])), g.get("question_level", pd.Series([])))
 
-def S_知识(g):
-    if "question_level" in g.columns and "correct" in g.columns:
-        mask = g["question_level"].isin([1,2])
-        score = g.loc[mask,"correct"].mean()*100 if mask.any() else g["correct"].mean()*100
-    else:
-        score = g["correct"].mean()*100 if "correct" in g.columns else 0.0
-    return 0.0 if pd.isna(score) else float(score)
+    # 维度合成：将“题型正确率”×（题型→能力映射）×（卷别题型占比）加权求和
+    ab_raw = {ab:0.0 for ab in ability_names}
+    weight_sum = {ab:0.0 for ab in ability_names}
+    for qt, acc in type_acc.items():
+        if np.isnan(acc): 
+            continue
+        for ab in ability_names:
+            w = ab_map.get(qt,{}).get(ab,0.0) * qtw.get(qt,0.0)
+            ab_raw[ab] += acc * w
+            weight_sum[ab] += w
+    # 转百分制 + 融入“尝试次数”“新题型”与“用时效率”等修正
+    out = {}
+    for ab in ability_names:
+        base = (ab_raw[ab]/weight_sum[ab]*100.0) if weight_sum[ab]>0 else np.nan
+        if np.isnan(base): base = (g["correct"].mean()*100.0) if "correct" in g else 0.0
 
+        # 表达规范性：一次命中率（答对且 attempts==1）/总答对
+        if ab=="表达规范性" and "attempts" in g.columns and "correct" in g.columns:
+            total_corr = int((g["correct"]==1).sum())
+            one_try = int(((g["correct"]==1) & (g["attempts"]==1)).sum())
+            exp_bonus = (one_try/total_corr*100.0) if total_corr>0 else 0.0
+            base = 0.6*base + 0.4*exp_bonus
 
-def S_逻辑(g):
-    if "question_level" in g.columns and "correct" in g.columns:
-        mask = g["question_level"]>=3
-        score = g.loc[mask,"correct"].mean()*100 if mask.any() else g["correct"].mean()*100
-    else:
-        score = g["correct"].mean()*100 if "correct" in g.columns else 0.0
-    return 0.0 if pd.isna(score) else float(score)
+        # 时间自控力：引入用时效率 te
+        if ab=="时间自控力" and not pd.isna(te):
+            base = min(100.0, base * (0.5 + 0.5*te))
 
+        # 创造策略力：新题型正确率加权提升
+        if ab=="创造策略力" and "is_new_type" in g.columns and "correct" in g.columns:
+            new_mask = g["is_new_type"]==1
+            if new_mask.any():
+                new_acc = g.loc[new_mask,"correct"].mean()*100.0
+                base = 0.6*base + 0.4*new_acc
 
-def S_策略(g):
-    if "is_new_type" in g.columns and "correct" in g.columns:
-        mask = g["is_new_type"]==1
-        score = g.loc[mask,"correct"].mean()*100 if mask.any() else S_逻辑(g)
-    else:
-        score = S_逻辑(g)
-    return 0.0 if pd.isna(score) else float(score)
-
-
-def S_表达(g):
-    if "correct" not in g.columns or "attempts" not in g.columns:
-        return 0.0
-    total_correct = int((g["correct"]==1).sum())
-    if total_correct==0: return 0.0
-    one_try = int(((g["correct"]==1) & (g["attempts"]==1)).sum())
-    return float(one_try/total_correct*100)
-
-
-def S_时间(g):
-    if "time_spent_sec" not in g.columns or "question_level" not in g.columns:
-        return 0.0
-    if len(g)==0: return 0.0
-    baseline = {1:60, 2:90, 3:120, 4:135, 5:150}
-    ideal = sum(baseline.get(int(x),90) for x in g["question_level"].fillna(2))
-    actual = g["time_spent_sec"].replace(0, np.nan).sum()
-    if pd.isna(actual) or actual<=0:
-        return 100.0 if ideal>0 else 0.0
-    score = min(100.0, max(0.0, ideal/actual*100.0))
-    return float(score)
-
-
-def S_情绪(g):
-    if "correct" not in g.columns: return 0.0
-    order = g.copy()
-    if "question_id" in order.columns:
-        try:
-            order["ord"] = order["question_id"].astype(str).str.extract(r"(\d+)").astype(float)
-            order = order.sort_values("ord")
-        except Exception:
-            order = order.reset_index(drop=True)
-    else:
-        order = order.reset_index(drop=True)
-    longest = cur = 0
-    for c in order["correct"].fillna(1):
-        try:
-            if int(c)==0:
-                cur += 1;  longest = max(longest, cur)
+        # 情绪稳定性：最长连续错误串越长扣分越多
+        if ab=="情绪稳定性" and "correct" in g.columns:
+            order = g.copy()
+            if "question_id" in order.columns:
+                try:
+                    order["ord"] = order["question_id"].astype(str).str.extract(r"(\d+)").astype(float)
+                    order = order.sort_values("ord")
+                except:
+                    order = order.reset_index(drop=True)
             else:
-                cur = 0
-        except Exception:
-            cur = 0
-    if longest<=1: return 100.0
-    return float(max(0.0, 100.0 - (longest-1)*20.0))
+                order = order.reset_index(drop=True)
+            longest = cur=0
+            for c in order["correct"]:
+                if int(c)==0: cur += 1;  longest = max(longest,cur)
+                else: cur = 0
+            emo = 100.0 if longest<=1 else max(0.0, 100.0-(longest-1)*20.0)
+            base = 0.5*base + 0.5*emo
 
-scores = {
-    "知识理解力": S_知识(sdf),
-    "逻辑思维力": S_逻辑(sdf),
-    "创造策略力": S_策略(sdf),
-    "表达沟通力": S_表达(sdf),
-    "时间自控力": S_时间(sdf),
-    "情绪稳定性": S_情绪(sdf),
-}
+        out[ab] = float(max(0.0, min(100.0, base)))
+    return out
+
+scores = score_by_ability(sdf)
 scores_int = {k:int(round(v)) for k,v in scores.items()}
+overall = (sum(scores[k]*W[k] for k in scores) / (W_sum if W_sum>0 else 1.0)) if W_sum>0 else 0.0
+overall_int = int(round(overall))
 
-# 归一化 W 已经计算为小数（如果用户勾选显示归一化），否则 W_raw 为百分比
-if auto_norm and W_sum>0:
-    overall = int(round(sum(scores[k]*W[k] for k in scores)))
-else:
-    # W_raw are percents, normalize when compute
-    overall = int(round(sum(scores[k]*W_raw[k] for k in scores) / (W_sum if W_sum>0 else 1.0)))
-
+# -------------- 展示：表格 + 雷达图 + 分布图 --------------
 left, right = st.columns([2,1])
 with left:
     st.subheader(f"学生 {sid} 的六维能力评分")
-    st.write(pd.Series({**scores_int, "总分": overall}).to_frame("得分"))
+    st.write(pd.Series({**scores_int, "总分": overall_int}).to_frame("得分"))
 
-# 雷达图
-from math import pi
-
+# 雷达图（单图）
 dims = list(scores_int.keys())
 vals = list(scores_int.values())
-angles = [n/float(len(dims))*2*pi for n in range(len(dims))]
+angles = [n/float(len(dims))*2*math.pi for n in range(len(dims))]
 angles += angles[:1]; radar_vals = vals + vals[:1]
-
 fig = plt.figure(figsize=(6,6))
 ax = fig.add_subplot(111, polar=True)
-ax.set_theta_offset(pi/2)
-ax.set_theta_direction(-1)
 ax.plot(angles, radar_vals, linewidth=2)
 ax.fill(angles, radar_vals, alpha=0.25)
-ax.set_xticks(angles[:-1]); ax.set_xticklabels(dims, fontsize=10)
-ax.set_ylim(0,100)
-ax.set_title("六维能力雷达图", pad=16)
-ax.grid(True)
-
+ax.set_xticks(angles[:-1]); ax.set_xticklabels(dims)
+ax.set_ylim(0,100); ax.set_title("六维能力雷达图", pad=16)
 with right:
     st.pyplot(fig, use_container_width=True)
 
-# 其他图表
 st.subheader("其他图表（可用于报告）")
 c3, c4 = st.columns(2)
 with c3:
@@ -398,119 +341,90 @@ with c3:
         fig2 = plt.figure(figsize=(5,4))
         sdf["question_level"].value_counts().sort_index().plot(kind="bar")
         plt.title("题目难度分布")
-        plt.xlabel("难度等级"); plt.ylabel("数量")
+        plt.xlabel("难度"); plt.ylabel("数量")
         st.pyplot(fig2, use_container_width=True)
 with c4:
-    if "topic" in sdf.columns:
+    if "qtype" in sdf.columns:
         fig3 = plt.figure(figsize=(5,4))
-        sdf["topic"].astype(str).value_counts().head(10).plot(kind="bar")
-        plt.title("知识点（Top10）")
-        plt.xlabel("topic"); plt.ylabel("数量")
+        sdf["qtype"].astype(str).value_counts().reindex(["单选","多选","填空","解答"]).dropna().plot(kind="bar")
+        plt.title("题型分布（样本）")
+        plt.xlabel("题型"); plt.ylabel("数量")
         st.pyplot(fig3, use_container_width=True)
 
-# ---------------- AI 生成分析（文字解读） ----------------
-st.header("④ AI 生成分析（可选）")
-st.caption("若在 Streamlit Cloud 的 Secrets 配置了 OPENAI_API_KEY，将生成更完整的自然语言解读；否则使用启发式建议。")
+# -------------- AI 生成分析（中文） --------------
+st.header("⑤ AI 生成分析（可选）")
+st.caption("在 Streamlit Secrets 设置 OPENAI_API_KEY（可选 OPENAI_BASE_URL、OPENAI_MODEL）以启用模型；否则使用启发式建议。")
+default_q = "请解释该学生的薄弱维度，并给出基于近年全国卷题型与能力考查趋势的 7 天训练计划（含每日题量、题型、知识点与时间分配建议）。"
+user_q = st.text_area("向 AI 提问（可改写）", value=default_q, height=120)
 
-def build_ctx():
-    return {
+if st.button("让 AI 分析这个学生"):
+    ctx = {
         "student_id": sid,
+        "paper": paper,
         "scores": scores_int,
-        "overall": overall,
-        "weights": W_raw,
+        "overall": overall_int,
+        "weights": W,
+        "qtype_prior": qtw,
+        "qtype_ability_map": ab_map,
         "row_count": int(len(sdf)),
         "columns": list(sdf.columns),
         "mapping": final_map,
-        "note": "可结合近十年全国卷题型与知识点分布进行建议。"
+        "note": "结合近年：基础性+核心素养（抽象/推理/建模/直观/运算/数据分析/创新）导向；乙卷常见8+3+3+5结构等。",
     }
-
-default_q = "请解释该学生的薄弱维度，并给出基于高考题型分布的7天训练计划（含每日题量、题型与知识点建议）。"
-user_q = st.text_area("向 AI 提问（可改写问题）", value=default_q, height=120)
-
-if st.button("让 AI 分析这个学生"):
-    ctx = build_ctx()
-    sys = "你是熟悉中国高考数学的智能助教，能将数据与高考题型分布关联，给出清晰、可执行的学习建议。回答用中文。"
+    sys = "你是熟悉中国高考数学的智能助教，能把“题型结构/能力导向/数据表现”联系起来，给出清晰可执行的学习/训练建议。回答用中文。"
     prompt = f"上下文：{json.dumps(ctx, ensure_ascii=False)}\n\n问题：{user_q}"
-    with st.spinner("AI 正在思考...（若未配置 API Key 将给出启发式建议）"):
-        reply = call_llm(sys, prompt)
+    reply = call_llm(sys, prompt)
     st.markdown("**AI 分析：**")
     st.write(reply)
-    try:
-        with open("ai_analysis_log.jsonl","a",encoding="utf-8") as f:
-            f.write(json.dumps({"time": datetime.now().isoformat(), "ctx": ctx, "q": user_q, "a": reply}, ensure_ascii=False) + "\n")
-        st.caption("已记录到 ai_analysis_log.jsonl")
-    except Exception:
-        st.caption("（日志保存失败 - 可能部署环境只读）")
+    with open("ai_analysis_log.jsonl","a",encoding="utf-8") as f:
+        f.write(json.dumps({"time": datetime.now().isoformat(), "ctx": ctx, "q": user_q, "a": reply}, ensure_ascii=False)+"\n")
+    st.caption("已记录到 ai_analysis_log.jsonl")
 
-# ---------------- 与 AI 聊天（含情绪安慰） ----------------
-st.header("⑤ 与 AI 对话")
-st.caption("随便聊学习/规划/情绪等。若配置 OPENAI_API_KEY 将由模型回答，否则给出启发式安慰/建议。")
-
+# -------------- 与 AI 聊天（学习/情绪都可） --------------
+st.header("⑥ 与 AI 对话（学习&情绪）")
+st.caption("自由讨论刷题策略、心态调整等。若未设置密钥，系统会用启发式安慰/建议。")
 if "chat" not in st.session_state:
     st.session_state.chat = []
 
-
 def render_chat():
     for role, content in st.session_state.chat:
-        if role == "user":
-            st.markdown(f"**你：** {content}")
+        if role=="user":
+            st.markdown(f"**你：**{content}")
         else:
-            st.markdown(f"**AI：** {content}")
+            st.markdown(f"**AI：**{content}")
 
 render_chat()
-user_msg = st.text_input("对 AI 说点什么……（按 Enter 发送）", key='user_input')
-if user_msg:
-    # 当用户按回车发送时触发
+user_msg = st.text_input("对 AI 说点什么……（回车或点击发送）")
+if st.button("发送") and user_msg:
     st.session_state.chat.append(("user", user_msg))
-    sys = "你是善解人意的学习助教，回答要真诚、具体、有可执行性；如检测到负面情绪，请先共情和安慰，再给出简单行动建议。回答中文。"
-    with st.spinner("AI 回复中..."):
-        ai_ans = call_llm(sys, user_msg)
+    sys = "你是善解人意的学习助教。若用户有负面情绪，先共情安慰，再给 1–2 条可执行的小建议；否则给学习策略。中文回答。"
+    ai_ans = call_llm(sys, user_msg)
     st.session_state.chat.append(("ai", ai_ans))
-    try:
-        with open("chat_history.jsonl","a",encoding="utf-8") as f:
-            f.write(json.dumps({"time": datetime.now().isoformat(), "user": user_msg, "ai": ai_ans}, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # 清空输入框（通过替换）
-    st.experimental_set_query_params(_sent=int(datetime.now().timestamp()))
+    with open("chat_history.jsonl","a",encoding="utf-8") as f:
+        f.write(json.dumps({"time": datetime.now().isoformat(), "user": user_msg, "ai": ai_ans}, ensure_ascii=False)+"\n")
     st.experimental_rerun()
 
-# ---------------- 导出（用于写报告） ----------------
-st.header("⑥ 下载产物（便于写研究报告）")
-st.download_button("下载归一化数据（CSV）", data=math_df.to_csv(index=False).encode("utf-8"), file_name="normalized_math.csv")
-
-# 全体学生评分
+# -------------- 导出（报告用） --------------
+st.header("⑦ 下载产物（便于写研究报告）")
+st.download_button("下载归一化数据（CSV）", data=math_df.to_csv(index=False).encode("utf-8"),
+                   file_name="normalized_math.csv")
 
 def calc_all(df):
-    out = []
-    students_all = sorted(df["student_id"].dropna().astype(str).unique())
-    for s in students_all:
+    out=[]
+    for s in sorted(df["student_id"].dropna().astype(str).unique()):
         g = df[df["student_id"].astype(str)==s]
-        sc = {
-            "student_id": s,
-            "知识理解力": S_知识(g),
-            "逻辑思维力": S_逻辑(g),
-            "创造策略力": S_策略(g),
-            "表达沟通力": S_表达(g),
-            "时间自控力": S_时间(g),
-            "情绪稳定性": S_情绪(g),
-        }
-        if auto_norm and W_sum>0:
-            sc["总分"] = sum(sc[k]*W[k] for k in W)/1.0
-        else:
-            sc["总分"] = (sum(sc[k]*W_raw[k] for k in W_raw) / (W_sum if W_sum>0 else 1.0))
+        sc = score_by_ability(g)
+        sc["student_id"]=s
+        sc["总分"] = (sum(sc[k]*W[k] for k in W.keys()) / (W_sum if W_sum>0 else 1.0)) if W_sum>0 else 0.0
         out.append(sc)
     return pd.DataFrame(out)
 
 all_scores = calc_all(math_df)
-st.download_button("下载全体评分（CSV）", data=all_scores.to_csv(index=False).encode("utf-8"), file_name="all_scores.csv")
+st.download_button("下载全体评分（CSV）", data=all_scores.to_csv(index=False).encode("utf-8"),
+                   file_name="all_scores.csv")
 
-# 导出雷达图 PNG
 buf = io.BytesIO()
 fig.savefig(buf, format="png", bbox_inches="tight")
-buf.seek(0)
 st.download_button("下载当前雷达图（PNG）", data=buf.getvalue(), file_name=f"{sid}_radar.png", mime="image/png")
-
-st.caption("改进建议：可把本文件部署到 Streamlit Cloud 并在 Secrets 中设置 OPENAI_API_KEY/OPENAI_BASE_URL/OPENAI_MODEL 来启用更丰富的 AI 功能。")
 
 
